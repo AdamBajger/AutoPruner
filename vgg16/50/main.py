@@ -39,7 +39,7 @@ parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('--compression_rate', default=0.4, type=float, help='the percentage of 1 in compressed model')
 parser.add_argument('--channel_index_range', default=20, type=int, help='the range to calculate channel index')
-parser.add_argument('--alpha_range', default=100, type=int, help='the range to calculate channel index')
+parser.add_argument('--alpha_range', default=100, type=int, help='the range to calculate channel index')  # minibatch size?
 parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 10)')
 args = parser.parse_args()
@@ -76,28 +76,29 @@ def main():
     # Phase 2 : Model setup
     print('\n[Phase 2] : Model setup')
     if args.layer_id == 0:
-        model_ft = Network_FT.Vgg16(args.ft_model_path).cuda()
-        model_ft = torch.nn.DataParallel(model_ft)
-        model_param = model_ft.state_dict()
-        torch.save(model_param, 'checkpoint/model.pth')
+        model_ft = Network_FT.Vgg16(args.ft_model_path).cuda()  # load a finetuned model (I guess it is the one we want to prune)
+        model_ft = torch.nn.DataParallel(model_ft)  # make it DataParallel for some reason (Why?)
+        model_param = model_ft.state_dict() # get the state dict of the params of the finetuned model
+        torch.save(model_param, 'checkpoint/model.pth')  # shared hardcoded directory that contains weights. Save the finetude model's weights
 
-    model_ft = Network_FT.NetworkNew(args.layer_id).cuda()
+    model_ft = Network_FT.NetworkNew(args.layer_id).cuda()  # Create a new network with a specific layer in mind
     print(model_ft)
-    model_ft = torch.nn.DataParallel(model_ft)
+    model_ft = torch.nn.DataParallel(model_ft)  # make the model DataParallel
     cudnn.benchmark = True
     print("model setup success!")
 
     # Phase 3: fine_tune model
     print('\n[Phase 3] : Model fine tune')
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss().cuda()  
     optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model_ft.parameters()), args.lr,
                                 momentum=0.9,
                                 weight_decay=args.weight_decay)
-    scale_factor_list = np.linspace(0.1, 2, int(args.num_epochs * len(train_loader) / args.alpha_range))
+    # 
+    scale_factor_list = np.linspace(0.1, 2, int(args.num_epochs * len(train_loader) / args.alpha_range))  # list of N evenly spaced numbers from 0.1 to 2, N is epochs*examples/alpha_range?
     reg_lambda = 10.0
     for epoch in range(args.start_epoch, args.num_epochs):
-        adjust_learning_rate(optimizer, epoch, 2)
+        adjust_learning_rate(optimizer, epoch, 2)  # classing learning rate scheduling
 
         # train for one epoch
         channel_index, reg_lambda = train(train_loader, model_ft, criterion, optimizer, epoch, reg_lambda)
@@ -132,20 +133,24 @@ def train(train_loader, model, criterion, optimizer, epoch, reg_lambda):
     channel_index = 0
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
+        # every alpha_range number of examples (checked by the modulo), basically supplies a minibatch size (I guess?)
         if i % args.alpha_range == 0:
+            # check if the alpha index is not off the scale_factor_list
             if alpha_index == len(scale_factor_list):
+                # if it is, change it back one step (HAHA this is so bad...)
                 alpha_index = len(scale_factor_list) - 1
-            scale_factor = scale_factor_list[alpha_index]
-            alpha_index = alpha_index + 1
+            scale_factor = scale_factor_list[alpha_index]  # update a scale factor to a value from the linspace list
+            alpha_index = alpha_index + 1  # increase the index by 1
         # measure data loading time
         data_time.update(time.time() - end)
-
+        
+        # torch async magic
         target = target.cuda(async=True)
         input_var = torch.autograd.Variable(input).cuda()
         target_var = torch.autograd.Variable(target).cuda()
 
         # compute output
-        output, scale_vec = model(input_var, scale_factor)
+        output, scale_vec = model(input_var, scale_factor)  # I provde input and scale_factor and get an output and scale vector
         loss = criterion(output, target_var)
         loss = loss + float(reg_lambda) * (
                 scale_vec.norm(1) / float(scale_vec.size(0)) - args.compression_rate) ** 2
@@ -276,7 +281,10 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 
 
 class AverageMeter(object):
-    """Computes and stores the average and current value"""
+    """
+    An object that helps you keep track of the average and current value of some variable based on manual updates
+    You just update the object everytime a new value arrives and you can retrieve the average value and number of updates any time
+    """
     def __init__(self):
         self.val = 0
         self.avg = 0
